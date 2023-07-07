@@ -1,0 +1,10 @@
+@startuml
+
+scale 2
+title My first Diagram
+
+A -> B : hello
+B -> C : Good morning
+C --> A : Bye bye
+
+@enduml
