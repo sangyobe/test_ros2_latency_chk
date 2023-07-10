@@ -71,7 +71,7 @@ private:
             msg.header.frame_id = s;
             pub_chk_response_->publish(msg);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         // log test
