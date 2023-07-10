@@ -2,106 +2,115 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <sys/time.h>
+#include <absl/strings/str_format.h>
 
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/float64_multi_array.h"
+#include "rclcpp/qos.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/int32.hpp"
+#include "latency_chk_proto/msg/latency_check_request.hpp"
+#include "latency_chk_proto/msg/latency_check_payload.hpp"
 
-class SystemHealthCheckImpl : public rclcpp::Node
+class SystemHealthCheckServerImpl : public rclcpp::Node
 {
 public:
-    SystemHealthCheckImpl()
-    : Node("minimal_publisher")
+    SystemHealthCheckServerImpl()
+    : Node("latency_check_server")
     {
-        sub_chk_request_ = this->create_subscription<std_msgs::msg::String>(
-            "topic_name", 10, std::bind(&SystemHealthCheckImpl::onChkLatency, this, std::placeholders::_1));
+        sub_chk_request_ = this->create_subscription<latency_chk_proto::msg::LatencyCheckRequest>(
+            "latency_chk_request", 10, std::bind(&SystemHealthCheckServerImpl::onChkLatencyRequest, this, std::placeholders::_1));
+        pub_chk_response_ = this->create_publisher<latency_chk_proto::msg::LatencyCheckPayload>(
+            "latency_chk_response",
+            //rclcpp::QoS(rclcpp::KeepLast(1000)).best_effort()
+            rclcpp::QoS(rclcpp::KeepLast(1000)).reliable()
         );
-        pub_chk_response_ = this->create_publisher<std_msgs::msg::String>(
-            "topic_name", 10);
-        );
+        pub_chk_complete_ = this->create_publisher<std_msgs::msg::Int32>(
+            "latency_chk_complete", 10);
     }
 
 private:
-    void do_run(const int runs, int snd_size /*bytes*/,
-         ::grpc::ServerWriter<::art_protocol::std_msgs::LatencyCheckPayload>
-             *writer) {
+    void notifyLatencyCheckComplete(int size) {
+        std_msgs::msg::Int32 msg;
+        msg.data = size;
+        pub_chk_complete_->publish(msg);
+    }
+
+    void do_run(const int runs, int snd_size) {
         // log parameter
-        LOG(INFO) << "--------------------------------------------";
-        LOG(INFO) << "Runs                    : " << runs;
-        LOG(INFO) << "Message size            : " << (snd_size / 1024) << " kB";
+        RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
+        RCLCPP_INFO(this->get_logger(), "Runs                    : %d", runs);
+        RCLCPP_INFO(this->get_logger(), "Message size            : %d KB",  snd_size / 1024);
 
-        // message LatencyCheckPayload {
-        //   Header header = 1;
-        //   bytes body = 2;
-        // }
-        art_protocol::std_msgs::LatencyCheckPayload msg;
+        latency_chk_proto::msg::LatencyCheckPayload msg;
+
         // prepare send buffer
-        std::unique_ptr<char[]> payload = std::make_unique<char[]>(snd_size + 1);
-        for (int i = 0; i < snd_size; i++)
-            payload[i] = ('a' + (i % 26));
-        payload[snd_size] = 0;
-
-        // msg.set_body(std::move(std::string(payload)));
-        msg.set_body(payload.get());
-
-        // let them match
-        // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        msg.header.frame_id = "";
+        std::vector<unsigned char> payload(snd_size + 1, 'a');
+        msg.set__body(payload);
 
         // run test
         int run(0);
         for (; run < runs; ++run) {
             // header
-            msg.mutable_header()->set_seq(run + 1);
-        #ifdef _WIN32
+#ifdef _WIN32
             FILETIME ft;
             GetSystemTimeAsFileTime(&ft);
             UINT64 ticks = (((UINT64)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
             // A Windows tick is 100 nanoseconds. Windows epoch 1601-01-01T00:00:00Z
             // is 11644473600 seconds before Unix epoch 1970-01-01T00:00:00Z.
-            timestamp.set_seconds((INT64)((ticks / 10000000) - 11644473600LL));
-            timestamp.set_nanos((INT32)((ticks % 10000000) * 100));
-        #else
+            msg.header.stamp.sec = ((INT64)((ticks / 10000000) - 11644473600LL));
+            msg.header.stamp.nanosec = ts->set_nanos((INT32)((ticks % 10000000) * 100));
+#else
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            msg.mutable_header()->mutable_time_stamp()->set_seconds(tv.tv_sec);
-            msg.mutable_header()->mutable_time_stamp()->set_nanos(tv.tv_usec * 1000);
-        #endif
-            msg.mutable_header()->set_frame_id("");
+            msg.header.stamp.sec = (tv.tv_sec);
+            msg.header.stamp.nanosec = (tv.tv_usec * 1000);
+#endif
+            std::string s = absl::StrFormat("s%d-r%d/%d", snd_size, (run+1), runs);
+            msg.header.frame_id = s;
+            pub_chk_response_->publish(msg);
 
-            writer->Write(msg);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
         // log test
-        RCLCPP_INFO(this->get_logger(), "Messages sent           : ");
+        RCLCPP_INFO(this->get_logger(), "Messages sent           : %d", run);
         RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
 
         // let the receiver do the evaluation
-        // std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+        // send check complete notification
+        notifyLatencyCheckComplete(snd_size);
+        RCLCPP_INFO(this->get_logger(), "Complete latency check !!!    ");
+        RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
     }
 
-    void onChkLatency(const std_msgs::msg::String& req) const {
-        RCLCPP_INFO(this->get_logger(), "Requested. %s", req.data.c_str());
+    void onChkLatencyRequest(const latency_chk_proto::msg::LatencyCheckRequest& request) {
 
-        int runs = request->runs();
-    int size = request->size();
+        int runs = request.runs;
+        int size = request.size;
 
-    if (runs <= 0 || size <= 0)
-      return ::grpc::Status::CANCELLED;
+        RCLCPP_INFO(this->get_logger(), "Latency check requested.(size = %d, runs = %d)", size, runs);
 
-    do_run(runs, size, writer);
-
-    
-        // auto message = std_msgs::msg::String();
-        // message.data = "hello";
-        // pub_chk_response_->publish(message);
+        if (runs <= 0 || size <= 0) {
+            RCLCPP_INFO(this->get_logger(), "Latency check canceled.");
+            return;
+        }
+        
+        do_run(runs, size);
     }
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_chk_request_;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_chk_response_;
+
+    rclcpp::Subscription<latency_chk_proto::msg::LatencyCheckRequest>::SharedPtr sub_chk_request_;
+    rclcpp::Publisher<latency_chk_proto::msg::LatencyCheckPayload>::SharedPtr pub_chk_response_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_chk_complete_;
 };
 
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SystemHealthCheckImpl>());
+    rclcpp::spin(std::make_shared<SystemHealthCheckServerImpl>());
     rclcpp::shutdown();
     return 0;
 }
