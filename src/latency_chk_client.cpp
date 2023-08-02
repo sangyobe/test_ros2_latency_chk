@@ -87,28 +87,60 @@ void log2file(std::vector<long long> &lat_arr_, size_t rec_size_,
   }
 }
 
+namespace latency_chk
+{
 class SystemHealthCheckClientImpl : public rclcpp::Node
 {
 public:
-    SystemHealthCheckClientImpl(int runs, int size,
-                  std::string &log_file)
-    : Node("latency_check_client"), runs_(runs), size_(size), size_running_(0), log_file_(log_file) 
+    SystemHealthCheckClientImpl(const rclcpp::NodeOptions & options)
+    : Node("latency_check_client", options), size_running_(0), recv_running_(0)
     {
-        pub_chk_request_ = this->create_publisher<latency_chk_proto::msg::LatencyCheckRequest>(
-            "latency_chk_request", 10);
-        sub_chk_response_ = this->create_subscription<latency_chk_proto::msg::LatencyCheckPayload>(
-            "latency_chk_response", 
-            //rclcpp::QoS(rclcpp::KeepLast(1000)).best_effort(), 
-            rclcpp::QoS(rclcpp::KeepLast(1000)).reliable(), 
-            std::bind(&SystemHealthCheckClientImpl::onChkLatencyResponse, this, std::placeholders::_1)
-        );
-        sub_chk_complete_ = this->create_subscription<std_msgs::msg::Int32>(
-            "latency_chk_complete", 10, std::bind(&SystemHealthCheckClientImpl::onChkLatencyComplete, this, std::placeholders::_1));
+        runs_ = 1;
+        size_ = -1;
+        log_file_ = "";
+        for(const rclcpp::Parameter& param : options.parameter_overrides()) {
+            if (param.get_name() == "runs" && 
+                param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+                    int runs = param.get_value<int>();
+                    if ( runs > 0) runs_ = runs;
+            }
+            else if (param.get_name() == "size" && 
+                param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+                    int size = param.get_value<int>();
+                    if ( size > 0) size_ = size;
+            }
+            else if (param.get_name() == "log_file" && 
+                param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+                    log_file_ = param.get_value<std::string>();
+            }
+        }
 
-        checkLatencyIfNecessary();
+
+        pub_chk_request_ = this->create_publisher<latency_chk_proto::msg::LatencyCheckRequest>(
+            "latency_chk_request", 
+            rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+        sub_chk_response_ = this->create_subscription<
+            latency_chk_proto::msg::LatencyCheckPayload>(
+            "latency_chk_payload",
+            //rclcpp::QoS(rclcpp::KeepLast(100)).best_effort().durability_volatile(),
+            rclcpp::QoS(rclcpp::KeepLast(100)).reliable(),
+            std::bind(&SystemHealthCheckClientImpl::onChkLatencyResponse, this,
+                      std::placeholders::_1));
+        sub_chk_complete_ = this->create_subscription<std_msgs::msg::Int32>(
+            "latency_chk_complete", 
+            rclcpp::QoS(rclcpp::KeepLast(10)).reliable(), 
+            std::bind(&SystemHealthCheckClientImpl::onChkLatencyComplete, this, std::placeholders::_1));
+
+        timer_start_check_ = create_wall_timer(std::chrono::milliseconds(500), std::bind(&SystemHealthCheckClientImpl::StartCheck, this));
     }
 
 private:
+    void StartCheck() {
+        RCLCPP_INFO(this->get_logger(), "======== StartCheck ========");
+        checkLatencyIfNecessary();
+        timer_start_check_.reset();
+    }
+
     void checkLatencyIfNecessary() {
 
         if (size_ < 0) {
@@ -119,6 +151,7 @@ private:
             else
                 return;
 
+            recv_running_ = 0;
             reqChkLatency(runs_, size_running_, log_file_);
 
         } else if (size_running_ <= 0) {
@@ -215,6 +248,7 @@ private:
     rclcpp::Subscription<latency_chk_proto::msg::LatencyCheckPayload>::SharedPtr sub_chk_response_;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_chk_complete_;
     rclcpp::Publisher<latency_chk_proto::msg::LatencyCheckRequest>::SharedPtr pub_chk_request_;
+    rclcpp::TimerBase::SharedPtr timer_start_check_;
     int runs_;
     int size_;
     int size_running_;
@@ -223,6 +257,19 @@ private:
     std::vector<long long> latency_vector_;
 };
 
+} // namespace latency_chk
+
+
+#ifdef BUILD_AS_COMPONENT
+
+#include "rclcpp_components/register_node_macro.hpp"
+// Register the component with class_loader.
+// This acts as a sort of entry point, allowing the component to be discoverable when its library
+// is being loaded into a running process.
+RCLCPP_COMPONENTS_REGISTER_NODE(latency_chk::SystemHealthCheckClientImpl)
+
+#else // BUILD_AS_COMPONENT
+
 int main(int argc, char* argv[])
 {
     try {
@@ -230,21 +277,27 @@ int main(int argc, char* argv[])
         TCLAP::CmdLine cmd("latency_snd");
         TCLAP::ValueArg<int> runs("r", "runs", "Number of messages to send.", false,
                                 1, "int");
-        TCLAP::ValueArg<int> size("s", "size", "Messages size in kB.", false, 4096,
+        TCLAP::ValueArg<int> size_kb("s", "size", "Messages size in kB.", false, 1,
                                 "int");
         TCLAP::ValueArg<std::string> log_file("l", "log_file",
                                             "Base file name to export results.",
                                             false, "", "string");
         cmd.add(runs);
-        cmd.add(size);
+        cmd.add(size_kb);
         cmd.add(log_file);
         cmd.parse(argc, argv);
 
         // request test
 
         rclcpp::init(argc, argv);
-        rclcpp::spin(std::make_shared<SystemHealthCheckClientImpl>(
-            runs.getValue(), size.getValue() * 1024, log_file.getValue()));
+        rclcpp::executors::MultiThreadedExecutor exec;
+        rclcpp::NodeOptions options;
+        options.append_parameter_override<int>("runs", runs.getValue())
+               .append_parameter_override<int>("size", size_kb.getValue() * 1024)
+               .append_parameter_override<std::string>("log_file", log_file.getValue());
+        rclcpp::Node::SharedPtr node = std::make_shared<latency_chk::SystemHealthCheckClientImpl>(options);
+        exec.add_node(node);
+        exec.spin();
         rclcpp::shutdown();
     } catch (TCLAP::ArgException &e) // catch any exceptions
     {
@@ -254,3 +307,5 @@ int main(int argc, char* argv[])
 
     return 0;
 }
+
+#endif // BUILD_AS_COMPONENT

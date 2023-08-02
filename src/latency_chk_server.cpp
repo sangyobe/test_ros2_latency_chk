@@ -12,21 +12,26 @@
 #include "latency_chk_proto/msg/latency_check_request.hpp"
 #include "latency_chk_proto/msg/latency_check_payload.hpp"
 
+namespace latency_chk 
+{
 class SystemHealthCheckServerImpl : public rclcpp::Node
 {
 public:
-    SystemHealthCheckServerImpl()
-    : Node("latency_check_server")
+    SystemHealthCheckServerImpl(const rclcpp::NodeOptions & options)
+    : Node("latency_check_server", options)
     {
         sub_chk_request_ = this->create_subscription<latency_chk_proto::msg::LatencyCheckRequest>(
-            "latency_chk_request", 10, std::bind(&SystemHealthCheckServerImpl::onChkLatencyRequest, this, std::placeholders::_1));
-        pub_chk_response_ = this->create_publisher<latency_chk_proto::msg::LatencyCheckPayload>(
-            "latency_chk_response",
-            //rclcpp::QoS(rclcpp::KeepLast(1000)).best_effort()
-            rclcpp::QoS(rclcpp::KeepLast(1000)).reliable()
-        );
+            "latency_chk_request", 
+            rclcpp::QoS(rclcpp::KeepLast(10)), 
+            std::bind(&SystemHealthCheckServerImpl::onChkLatencyRequest, this, std::placeholders::_1));
+        pub_chk_response_ =
+            this->create_publisher<latency_chk_proto::msg::LatencyCheckPayload>(
+                "latency_chk_payload",
+                //rclcpp::QoS(rclcpp::KeepLast(100)).best_effort().durability_volatile());
+                rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
         pub_chk_complete_ = this->create_publisher<std_msgs::msg::Int32>(
-            "latency_chk_complete", 10);
+            "latency_chk_complete",
+            rclcpp::QoS(rclcpp::KeepLast(10)));
     }
 
 private:
@@ -40,13 +45,13 @@ private:
         // log parameter
         RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
         RCLCPP_INFO(this->get_logger(), "Runs                    : %d", runs);
-        RCLCPP_INFO(this->get_logger(), "Message size            : %d KB",  snd_size / 1024);
+        RCLCPP_INFO(this->get_logger(), "Message size            : %d KB", snd_size / 1024);
 
         latency_chk_proto::msg::LatencyCheckPayload msg;
 
         // prepare send buffer
         msg.header.frame_id = "";
-        std::vector<unsigned char> payload(snd_size + 1, 'a');
+        std::vector<unsigned char> payload(snd_size, 'a');
         msg.set__body(payload);
 
         // run test
@@ -78,13 +83,11 @@ private:
         RCLCPP_INFO(this->get_logger(), "Messages sent           : %d", run);
         RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
 
-        // let the receiver do the evaluation
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        // let the client receive the last LatencyCheckPayload message
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
 
         // send check complete notification
         notifyLatencyCheckComplete(snd_size);
-        RCLCPP_INFO(this->get_logger(), "Complete latency check !!!    ");
-        RCLCPP_INFO(this->get_logger(), "--------------------------------------------");
     }
 
     void onChkLatencyRequest(const latency_chk_proto::msg::LatencyCheckRequest& request) {
@@ -107,10 +110,24 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_chk_complete_;
 };
 
+} // namespace latency_chk 
+
+#ifdef BUILD_AS_COMPONENT
+
+#include "rclcpp_components/register_node_macro.hpp"
+// Register the component with class_loader.
+// This acts as a sort of entry point, allowing the component to be discoverable when its library
+// is being loaded into a running process.
+RCLCPP_COMPONENTS_REGISTER_NODE(latency_chk::SystemHealthCheckServerImpl)
+
+#else // BUILD_AS_COMPONENT
+
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SystemHealthCheckServerImpl>());
+    rclcpp::spin(std::make_shared<latency_chk::SystemHealthCheckServerImpl>(rclcpp::NodeOptions()));
     rclcpp::shutdown();
     return 0;
 }
+
+#endif // BUILD_AS_COMPONENT

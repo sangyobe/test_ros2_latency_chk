@@ -1,0 +1,13 @@
+launch:
+
+- node:
+    pkg: "latency_chk"
+    exec: "latency_chk_server"
+    name: "latency_chk_server"
+    namespace: "/"
+
+- node:
+    pkg: "latency_chk"
+    exec: "latency_chk_client"
+    name: "latency_chk_client"
+    namespace: "/"
